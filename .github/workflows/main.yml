@@ -1,0 +1,45 @@
+on:
+  push:
+    branches:
+    - main
+
+jobs:
+  build:
+    runs-on: ubuntu-lastest
+    steps:
+    - uses: cachix/install-nix-action@v31.8.4
+    - run: nix build .#static
+    - run: |
+        cp -r result/bin/ ./
+        tar jcf hoip-x86_64.tar.bz2 bin/
+        rm -rf bin/
+    - run: nix build .#pkgsCross.aarch64-multiplatform-musl.pkgsStatic.hid-over-ip
+    - run: |
+        cp -r result/bin/ ./
+        tar jcf hoip-aarch64.tar.bz2 bin/
+        rm -rf bin/
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.target }}
+        path: hoip-*.tar.bz2
+        if-no-files-found: error
+
+  release:
+    needs: [ build ]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/download-artifact@v4
+      with:
+        merge-multiple: true
+    - if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -x
+        gh release delete latest --cleanup-tag || true
+        gh release create latest \
+          hoip-x86_64.tar.bz2 \
+          hoip-aarch64.tar.bz2 \
+          --title "Latest build"
+                
