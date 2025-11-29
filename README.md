@@ -28,6 +28,9 @@ one loses "hot edges" thing: switching between machines has to be done
 explicitly via a hotkey or a mouse gesture. But personally I find "hot edges"
 more annoying than useful anyway.
 
+Conceptually, this is somewhat similar to
+[netevent](https://github.com/Blub/netevent), but is much, much simpler.
+
 ## How it works
 
 Basically, there are two parts here, "server" (`hoips`) which has access to
