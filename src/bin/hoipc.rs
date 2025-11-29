@@ -11,7 +11,9 @@ use tokio_util::codec::Framed;
 
 #[derive(clap::Parser)]
 struct Cli {
-    /// Address/port to listen on. `0.0.0.0` is any address.
+    /// Address/port to listen on. `0.0.0.0` is any v4 address, `[::]` is
+    /// usually any address, v4 or v6 (but depends on `net.ipv6.bindv6only`
+    /// sysctl)
     #[arg(long, short)]
     listen: String,
     /// Name of the virtual device.
