@@ -58,8 +58,17 @@
                 inherit system;
                 overlays = [ self.overlays.default ];
               }).pkgsStatic.hid-over-ip;
-            apps.default = flake-utils.lib.mkApp {
-              drv = self.packages.${system}.default;
+            apps = rec {
+              server = {
+                type = "app";
+                program = nixpkgs.lib.getExe' self.packages.${system}.default "hoips";
+              };
+              hoips = server;
+              client = {
+                type = "app";
+                program = nixpkgs.lib.getExe' self.packages.${system}.default "hoipc";
+              };
+              hoipc = client;
             };
           }
         );
