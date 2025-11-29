@@ -48,6 +48,8 @@
                 clippy
                 rust-analyzer
                 rustfmt
+                nixfmt-rfc-style
+                treefmt
               ];
               # Environment variables
               RUST_SRC_PATH = pkgs.rustPlatform.rustLibSrc;
