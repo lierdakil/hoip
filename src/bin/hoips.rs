@@ -1,4 +1,7 @@
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{HashMap, HashSet, hash_map::Entry},
+    time::Duration,
+};
 
 use clap::Parser;
 use evdev::{EventSummary, KeyCode};
@@ -20,8 +23,9 @@ struct Cli {
     /// List devices and exit.
     #[arg(long)]
     list_devices: bool,
-    #[arg(long, short, default_value = "KEY_F12")]
-    magic_key: KeyCode,
+    /// Keys, when pressed, will release the grab or connect to the next client.
+    #[arg(long, short, default_values = ["KEY_LEFTCTRL","KEY_LEFTSHIFT","KEY_F12"])]
+    magic_key: Vec<KeyCode>,
 }
 
 enum Error {
@@ -36,6 +40,31 @@ where
     #[cold]
     fn from(error: E) -> Self {
         Error::Other(anyhow::Error::from(error))
+    }
+}
+
+struct Magic {
+    keys: HashMap<KeyCode, i32>,
+    armed: bool,
+}
+
+impl Magic {
+    fn from_iter<'a>(iter: impl IntoIterator<Item = &'a KeyCode>) -> Self {
+        Self {
+            keys: HashMap::from_iter(iter.into_iter().map(|k| (*k, 0))),
+            armed: false,
+        }
+    }
+
+    fn key(&mut self, key_code: KeyCode, value: i32) -> bool {
+        if let Entry::Occupied(mut entry) = self.keys.entry(key_code) {
+            entry.insert(value);
+            let next_armed = self.keys.values().all(|v| *v != 0);
+            let prev_armed = std::mem::replace(&mut self.armed, next_armed);
+            prev_armed && !next_armed
+        } else {
+            false
+        }
     }
 }
 
@@ -96,10 +125,9 @@ async fn main() -> anyhow::Result<()> {
             dev.device_mut().grab()?;
         }
         tracing::info!("Grabbed devices");
+        let mut magic = Magic::from_iter(&config.magic_key);
         let mut udev_stream = udev_stream.map(|evt| match evt.as_ref().map(|x| x.destructure()) {
-            Ok(EventSummary::Key(_, key_code, value))
-                if key_code == config.magic_key && value == 0 =>
-            {
+            Ok(EventSummary::Key(_, key_code, value)) if magic.key(key_code, value) => {
                 Err(Error::MagicKey)
             }
             _ => evt.map_err(Error::Other),
@@ -134,10 +162,10 @@ async fn main() -> anyhow::Result<()> {
         if magic {
             tracing::info!("Waiting for magic key...");
             let mut stream = udev_stream.lock().await;
+            let mut magic = Magic::from_iter(&config.magic_key);
             while let Some(evt) = stream.try_next().await? {
                 if let EventSummary::Key(_, key_code, value) = evt.destructure()
-                    && key_code == config.magic_key
-                    && value == 0
+                    && magic.key(key_code, value)
                 {
                     tracing::info!("Magic key pressed");
                     break;
