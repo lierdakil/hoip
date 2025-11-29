@@ -48,6 +48,13 @@ the host), but in practice it's extremely straightforward.
 Aside from the ususal `cargo build --release`, this repo is a Nix flake, so you
 can build via `nix build`. Aside from the `default` output, it also provides `static` output for static musl builds, and apps to run it ad-hoc. So in principle you can test-drive via `nix run github:lierdakil/hoip#server` and `nix run github:lierdakil/hoip#client` respectively.
 
+### Cross-compilation
+
+The flake exposes `pkgsCross` set, so you can try to build via `nix build
+.#pkgsCross.<target>.hid-over-ip`. This is only validated to work for
+`aarch64-multiplatform-musl`, however, so if things go wrong, you're on your
+own.
+
 ## Stability
 
 While this works mostly fine, I make no guarantees about not changing something

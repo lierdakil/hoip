@@ -38,7 +38,12 @@
         (
           system:
           let
-            pkgs = nixpkgs.legacyPackages.${system};
+            pkgs = (
+              import nixpkgs {
+                inherit system;
+                overlays = [ self.overlays.default ];
+              }
+            );
           in
           {
             devShells.default = pkgs.mkShell {
@@ -54,12 +59,17 @@
               # Environment variables
               RUST_SRC_PATH = pkgs.rustPlatform.rustLibSrc;
             };
-            packages.default = mkPackage pkgs;
-            packages.static =
-              (import nixpkgs {
-                inherit system;
-                overlays = [ self.overlays.default ];
-              }).pkgsStatic.hid-over-ip;
+            packages.default = pkgs.hid-over-ip;
+            packages.static = pkgs.pkgsStatic.hid-over-ip;
+            legacyPackages.pkgsCross = nixpkgs.lib.mapAttrs (_: v: {
+              inherit (v) hid-over-ip;
+              pkgsStatic = {
+                # a horrible hack to avoid the whole pkgsCross.*.pkgsStatic mess
+                hid-over-ip = v.hid-over-ip.overrideAttrs (_: {
+                  env.RUSTFLAGS = "-C target-feature=+crt-static";
+                });
+              };
+            }) pkgs.pkgsCross;
             apps = rec {
               server = {
                 type = "app";
