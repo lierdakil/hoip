@@ -57,12 +57,15 @@ impl App {
 
         impl Drop for DropGuard<'_> {
             fn drop(&mut self) {
-                let mut evts = Vec::with_capacity(self.0.pressed_keys.len());
-                while let Some(key) = self.0.pressed_keys.pop_first() {
-                    evts.push(InputEvent::new(EventType::KEY.0, key.0, 0));
-                }
-                if let Err(e) = self.0.dev.emit(&evts) {
-                    tracing::error!(%e, "Error while cleaning up stuck keys")
+                if !self.0.pressed_keys.is_empty() {
+                    tracing::info!("Cleaning up stuck keys");
+                    let mut evts = Vec::with_capacity(self.0.pressed_keys.len());
+                    while let Some(key) = self.0.pressed_keys.pop_first() {
+                        evts.push(InputEvent::new(EventType::KEY.0, key.0, 0));
+                    }
+                    if let Err(e) = self.0.dev.emit(&evts) {
+                        tracing::error!(%e, "Error while cleaning up stuck keys")
+                    }
                 }
             }
         }
