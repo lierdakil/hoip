@@ -87,17 +87,17 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let requested_devices: HashSet<_> = config.device.iter().map(|x| x.as_str()).collect();
+    let mut requested_devices: HashSet<_> = config.device.iter().map(|x| x.as_str()).collect();
     let mut devices: Vec<evdev::Device> = vec![];
     for (path, dev) in evdev::enumerate() {
-        let matches = if requested_devices.contains(&*path.to_string_lossy()) {
+        let matches = if requested_devices.remove(&*path.to_string_lossy()) {
             true
-        } else if let Some(name) = &dev.name()
-            && requested_devices.contains(name)
+        } else if let Some(name) = dev.name()
+            && requested_devices.remove(name)
         {
             true
-        } else if let Some(name) = &dev.unique_name()
-            && requested_devices.contains(name)
+        } else if let Some(name) = dev.unique_name()
+            && requested_devices.remove(name)
         {
             true
         } else {
@@ -108,7 +108,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    tracing::debug!(?devices, "Opened and grabbed devices");
+    for i in requested_devices.iter() {
+        tracing::warn!(device = i, "Device not found");
+    }
+
+    tracing::info!("Opened devices");
     let streams: Vec<_> = devices
         .into_iter()
         .map(|dev| dev.into_event_stream())
