@@ -96,8 +96,16 @@ impl App {
 async fn main() -> anyhow::Result<()> {
     init_logging();
 
-    let mut app = App::new(Cli::parse())?;
+    let config = Cli::parse();
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::select! {
+        _ = ctrl_c => Ok(()),
+        res = imp(config) => res,
+    }
+}
 
+async fn imp(config: Cli) -> anyhow::Result<()> {
+    let mut app = App::new(config)?;
     loop {
         if let Err(e) = app.connect_loop().await {
             tracing::error!(%e);

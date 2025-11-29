@@ -87,6 +87,15 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let ctrl_c = tokio::signal::ctrl_c();
+
+    tokio::select! {
+        _ = ctrl_c => Ok(()),
+        res = imp(config) => res,
+    }
+}
+
+async fn imp(config: Cli) -> anyhow::Result<()> {
     let mut requested_devices: HashSet<_> = config.device.iter().map(|x| x.as_str()).collect();
     let mut devices: Vec<evdev::Device> = vec![];
     for (path, dev) in evdev::enumerate() {
