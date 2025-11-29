@@ -5,8 +5,8 @@ use std::{
 };
 
 use clap::Parser;
-use evdev::{EventSummary, KeyCode};
-use futures::{SinkExt, StreamExt, TryStreamExt};
+use evdev::{EventSummary, InputEvent, KeyCode};
+use futures::{SinkExt, StreamExt, TryStream, TryStreamExt};
 use hid_over_ip::{Codec, init_logging};
 use tokio::sync::Mutex;
 use tokio_util::codec::Framed;
@@ -21,15 +21,18 @@ use tokio_util::codec::Framed;
 struct Cli {
     /// Devices to grab events from. Either path to /dev/input/event*, a name,
     /// or a unique identifier. Use `--list-devices` to get a list.
-    #[arg(long, short, required = true)]
+    #[arg(long, short, required_unless_present_any = ["list_devices", "dump_events"])]
     device: Vec<String>,
     /// Clients to send events to. Only one client can be active at a time, will
     /// round-robin between them.
-    #[arg(long, short, required = true)]
+    #[arg(long, short, required_unless_present_any = ["list_devices", "dump_events"])]
     connect: Vec<String>,
     /// List devices and exit.
     #[arg(long, short, conflicts_with_all = ["device", "connect"])]
     list_devices: bool,
+    /// Dump all events to stdout from all devices listed with `--device`.
+    #[arg(long, conflicts_with_all = ["list_devices", "connect"])]
+    dump_events: bool,
     /// Keys, when pressed, will release the grab or connect to the next client.
     #[arg(long, short, default_values = ["KEY_LEFTCTRL","KEY_LEFTSHIFT","KEY_F12"])]
     magic_key: Vec<KeyCode>,
@@ -142,6 +145,10 @@ async fn imp(config: Cli) -> anyhow::Result<()> {
 
     let udev_stream = Mutex::new(futures::stream::select_all(streams).err_into());
 
+    if config.dump_events {
+        return dump_events(&mut *udev_stream.lock().await).await;
+    }
+
     let connect = async |connect| {
         let tcp_stream = tokio::net::TcpStream::connect(connect).await?;
         tracing::info!(remote = connect, "Connected to remote");
@@ -202,4 +209,42 @@ async fn imp(config: Cli) -> anyhow::Result<()> {
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
     }
+}
+
+async fn dump_events(
+    udev_stream: &mut (impl TryStream<Ok = InputEvent, Error = anyhow::Error> + Unpin),
+) -> anyhow::Result<()> {
+    while let Some(event) = udev_stream.try_next().await? {
+        macro_rules! dump {
+            ($($i:ident),* $(,)*) => {
+                match event.destructure() {
+                    $(
+                    EventSummary::$i(event, code, value) => {
+                        println!(
+                            "type={:?} code={code:?} value={value}",
+                            event.event_type(),
+                        );
+                    }
+                    )*
+                }
+            };
+        }
+        dump!(
+            Synchronization,
+            Key,
+            RelativeAxis,
+            AbsoluteAxis,
+            Misc,
+            Switch,
+            Led,
+            Sound,
+            Repeat,
+            ForceFeedback,
+            Power,
+            ForceFeedbackStatus,
+            UInput,
+            Other,
+        );
+    }
+    Ok(())
 }
