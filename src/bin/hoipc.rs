@@ -44,8 +44,12 @@ impl App {
     fn new(config: Cli) -> anyhow::Result<Self> {
         Ok(Self {
             dev: {
-                tracing::info!("Creating virtual device");
-                builder(&config)?.build()?
+                let mut dev = builder(&config)?.build()?;
+                tracing::info!(
+                    path = %dev.get_syspath()?.display(),
+                    "Created virtual device"
+                );
+                dev
             },
             config,
             pressed_keys: BTreeSet::new(),
