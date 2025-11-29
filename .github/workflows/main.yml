@@ -6,23 +6,26 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+        - target: static
+          arch: x86_64
+        - target: pkgsCross.aarch64-multiplatform-musl.pkgsStatic.hid-over-ip
+          arch: aarch64
     steps:
     - uses: actions/checkout@v6.0.0
     - uses: cachix/install-nix-action@v31.8.4
-    - run: nix build .#static
+    - run: nix build -L .#${{ matrix.target }}
     - run: |
         cp -r result/bin/ ./
-        tar jcf hoip-x86_64.tar.bz2 bin/
-        rm -rf bin/
-    - run: nix build .#pkgsCross.aarch64-multiplatform-musl.pkgsStatic.hid-over-ip
-    - run: |
-        cp -r result/bin/ ./
-        tar jcf hoip-aarch64.tar.bz2 bin/
+        tar jcf hoip-${{ matrix.arch }}.tar.bz2 bin/
+        chmod -R u+w bin/
         rm -rf bin/
     - uses: actions/upload-artifact@v4
       with:
         name: ${{ matrix.target }}
-        path: hoip-*.tar.bz2
+        path: hoip-${{ matrix.arch }}.tar.bz2
         if-no-files-found: error
 
   release:
