@@ -64,6 +64,53 @@ While this works mostly fine, I make no guarantees about not changing something
 drastically in the future. At this point, this is little more than a tech demo
 I've slapped together over a couple evenings, treat it as such.
 
+## Usage
+
+First of all, make sure your user has access to `/dev/input/*` and
+`/dev/uinput`. On most distros this means being in the `input` group. Failing
+that, you'll have to run these binaries as root (either via suid, from systemd
+system units or directly).
+
+On the remote system you want to pass through inputs to, run:
+
+```
+./hoipc --listen '[::]:1234'
+```
+(you can change the port to anything you want)
+
+On the local system (that has input devices physically attached), find the
+devices you want to pass through:
+
+```
+./hoips -l
+```
+
+Pay attention to `name=...` and `uniq=...` (if `unset` can't be used). Make note
+of either the device path (`/dev/input/event...`), `name` or `uniq`, to pass to
+`--device` later. Say you find your devices to be named `My Keyboard` and `My
+Mouse` (again, it might be either the path, or `name` or `uniq`, if present)
+
+Now run
+
+```
+./hoips --device 'My Keyboard' --device 'My Mouse' --connect <remote-ip>:1234
+```
+
+To release controls back to the host, use `Ctrl`+`Shift`+`F12`. Press again to
+grab them.
+
+`--connect` can be passed multiple times, in which case each subsequent
+connection will be made to a different client (in order they're specified).
+
+You can change key combination to release/grab controls by using the `--magic`
+option. The list of possible keys can be found
+[here](https://docs.rs/evdev/latest/evdev/struct.KeyCode.html#impl-KeyCode-1) --
+all of those keys must be pressed simultaneously. Note this also includes mouse
+buttons, so you can use `BTN_LEFT`, `BTN_SIDE` &c.
+
+You can use `hoips --dump-events -d device` to find the exact names (see the
+`code` field)
+
 ## License
 
 MIT, see LICENSE.
