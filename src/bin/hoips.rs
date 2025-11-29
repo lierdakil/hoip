@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, hash_map::Entry},
+    collections::{BTreeMap, HashSet, btree_map::Entry},
     time::Duration,
 };
 
@@ -44,14 +44,14 @@ where
 }
 
 struct Magic {
-    keys: HashMap<KeyCode, i32>,
+    keys: BTreeMap<KeyCode, i32>,
     armed: bool,
 }
 
 impl Magic {
     fn from_iter<'a>(iter: impl IntoIterator<Item = &'a KeyCode>) -> Self {
         Self {
-            keys: HashMap::from_iter(iter.into_iter().map(|k| (*k, 0))),
+            keys: BTreeMap::from_iter(iter.into_iter().map(|k| (*k, 0))),
             armed: false,
         }
     }

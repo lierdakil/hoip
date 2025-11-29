@@ -1,6 +1,9 @@
+use std::collections::BTreeSet;
+
 use clap::Parser;
 use evdev::{
-    AttributeSet, BusType, InputId, KeyCode, PropType, RelativeAxisCode, uinput::VirtualDevice,
+    AttributeSet, BusType, EventType, InputEvent, InputId, KeyCode, PropType, RelativeAxisCode,
+    uinput::VirtualDevice,
 };
 use futures::TryStreamExt;
 use hid_over_ip::{Codec, init_logging};
@@ -31,37 +34,75 @@ struct Cli {
     no_high_res_scroll: bool,
 }
 
+struct App {
+    config: Cli,
+    dev: VirtualDevice,
+    pressed_keys: BTreeSet<KeyCode>,
+}
+
+impl App {
+    fn new(config: Cli) -> anyhow::Result<Self> {
+        Ok(Self {
+            dev: {
+                tracing::info!("Creating virtual device");
+                builder(&config)?.build()?
+            },
+            config,
+            pressed_keys: BTreeSet::new(),
+        })
+    }
+
+    async fn connect_loop(&mut self) -> anyhow::Result<()> {
+        struct DropGuard<'a>(&'a mut App);
+
+        impl Drop for DropGuard<'_> {
+            fn drop(&mut self) {
+                let mut evts = Vec::with_capacity(self.0.pressed_keys.len());
+                while let Some(key) = self.0.pressed_keys.pop_first() {
+                    evts.push(InputEvent::new(EventType::KEY.0, key.0, 0));
+                }
+                if let Err(e) = self.0.dev.emit(&evts) {
+                    tracing::error!(%e, "Error while cleaning up stuck keys")
+                }
+            }
+        }
+
+        let drop = DropGuard(self);
+        let this = &mut *drop.0;
+        let (tcp_stream, remote) = {
+            let listener = tokio::net::TcpListener::bind(&this.config.listen).await?;
+            tracing::info!(address = &this.config.listen, "Started listener");
+            listener.accept().await?
+        };
+        tracing::info!(%remote, "Accepted remote connection");
+        let mut framed = Framed::new(tcp_stream, Codec);
+        tracing::info!("Starting event loop");
+        while let Some(next) = framed.try_next().await? {
+            if let evdev::EventSummary::Key(_, key_code, value) = next.destructure() {
+                if matches!(value, 0) {
+                    this.pressed_keys.remove(&key_code);
+                } else {
+                    this.pressed_keys.insert(key_code);
+                }
+            }
+            this.dev.emit(&[next])?;
+        }
+        tracing::info!(%remote, "Connection closed normally");
+        anyhow::Ok(())
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_logging();
 
-    let config = Cli::parse();
+    let mut app = App::new(Cli::parse())?;
 
     loop {
-        if let Err(e) = connect(&config).await {
+        if let Err(e) = app.connect_loop().await {
             tracing::error!(%e);
         }
     }
-}
-
-async fn connect(config: &Cli) -> anyhow::Result<()> {
-    let (tcp_stream, remote) = {
-        let listener = tokio::net::TcpListener::bind(&config.listen).await?;
-        tracing::info!(address = config.listen, "Started listener");
-        listener.accept().await?
-    };
-    tracing::info!(%remote, "Accepted remote connection");
-    let mut framed = Framed::new(tcp_stream, Codec);
-    let dev = builder(config)?;
-    let dev = dev.build()?;
-    tracing::info!("Created virtual device");
-    let mut udev_stream = dev.into_event_stream()?;
-    tracing::info!("Starting event loop");
-    while let Some(next) = framed.try_next().await? {
-        udev_stream.device_mut().emit(&[next])?;
-    }
-    tracing::info!(%remote, "Connection closed normally");
-    anyhow::Ok(())
 }
 
 fn builder(config: &Cli) -> anyhow::Result<evdev::uinput::VirtualDeviceBuilder<'_>> {
