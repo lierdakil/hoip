@@ -9,7 +9,13 @@ use futures::TryStreamExt;
 use hid_over_ip::{Codec, init_logging};
 use tokio_util::codec::Framed;
 
+/// HoIP -- HID-over-IP. Share keyboard and mouse (or other HID inputs) over
+/// TCP/IP.
+///
+/// HoIP "client". Will receive input events from the "server" and pass them
+/// through to the system it runs on via a virtual input device.
 #[derive(clap::Parser)]
+#[command(version)]
 struct Cli {
     /// Address/port to listen on. `0.0.0.0` is any v4 address, `[::]` is
     /// usually any address, v4 or v6 (but depends on `net.ipv6.bindv6only`

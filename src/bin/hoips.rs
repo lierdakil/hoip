@@ -11,15 +11,21 @@ use hid_over_ip::{Codec, init_logging};
 use tokio::sync::Mutex;
 use tokio_util::codec::Framed;
 
+/// HoIP -- HID-over-IP. Share keyboard and mouse (or other HID inputs) over
+/// TCP/IP.
+///
+/// HoIP "server". This program needs to run on the system that has the physical
+/// input devices, and will send events from those devices over the network.
 #[derive(clap::Parser)]
+#[command(version)]
 struct Cli {
     /// Devices to grab events from. Either path to /dev/input/event*, a name,
     /// or a unique identifier. Use `--list-devices` to get a list.
-    #[arg(long, short)]
+    #[arg(long, short, required = true)]
     device: Vec<String>,
     /// Clients to send events to. Only one client can be active at a time, will
     /// round-robin between them.
-    #[arg(long, short)]
+    #[arg(long, short, required = true)]
     connect: Vec<String>,
     /// List devices and exit.
     #[arg(long, short)]
