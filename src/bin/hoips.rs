@@ -21,7 +21,7 @@ struct Cli {
     #[arg(long, short)]
     connect: Vec<String>,
     /// List devices and exit.
-    #[arg(long)]
+    #[arg(long, short)]
     list_devices: bool,
     /// Keys, when pressed, will release the grab or connect to the next client.
     #[arg(long, short, default_values = ["KEY_LEFTCTRL","KEY_LEFTSHIFT","KEY_F12"])]
