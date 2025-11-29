@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, process::ExitCode};
 
 use clap::Parser;
 use evdev::{
@@ -93,14 +93,20 @@ impl App {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> ExitCode {
     init_logging();
 
     let config = Cli::parse();
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::select! {
-        _ = ctrl_c => Ok(()),
-        res = imp(config) => res,
+        _ = ctrl_c => ExitCode::SUCCESS,
+        res = imp(config) => match res {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                tracing::error!(%error);
+                ExitCode::FAILURE
+            },
+        },
     }
 }
 

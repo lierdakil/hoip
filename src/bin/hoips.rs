@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashSet, btree_map::Entry},
+    process::ExitCode,
     time::Duration,
 };
 
@@ -69,7 +70,7 @@ impl Magic {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> ExitCode {
     init_logging();
 
     let config = Cli::parse();
@@ -84,14 +85,20 @@ async fn main() -> anyhow::Result<()> {
                 dev.supported_events(),
             );
         }
-        return Ok(());
+        return ExitCode::SUCCESS;
     }
 
     let ctrl_c = tokio::signal::ctrl_c();
 
     tokio::select! {
-        _ = ctrl_c => Ok(()),
-        res = imp(config) => res,
+        _ = ctrl_c => ExitCode::SUCCESS,
+        res = imp(config) => match res {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                tracing::error!(%error);
+                ExitCode::FAILURE
+            },
+        },
     }
 }
 
