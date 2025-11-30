@@ -111,6 +111,12 @@ buttons, so you can use `BTN_LEFT`, `BTN_SIDE` &c.
 You can use `hoips --dump-events -d device` to find the exact names (see the
 `code` field)
 
+If you omit `--connect`, there's an autodiscovery mode which uses UDP multicast.
+Works well enough on wired connections within the local segment, but with
+wireless it's very much hit or miss.
+
+See `./hoips --help` and `./hoipc --help` for more details.
+
 ## License
 
 MIT, see LICENSE.
