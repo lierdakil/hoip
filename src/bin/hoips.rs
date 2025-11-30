@@ -149,7 +149,7 @@ async fn main() -> ExitCode {
         res = imp(config) => match res {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                tracing::error!("{error:#}");
+                tracing::error!("{error:?}");
                 ExitCode::FAILURE
             },
         },
