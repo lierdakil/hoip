@@ -193,10 +193,7 @@ pub fn guess_iface(bind_addr: SocketAddr, discovery_ifname: Option<&str>) -> any
         None
     };
     Ok(discovery_ifname
-        .map(getifaddrs::if_nametoindex)
-        .transpose()
-        .context("if_nametoindex")?
-        .map(Ok)
+        .map(|ifname| getifaddrs::if_nametoindex(ifname).context("if_nametoindex"))
         .or_else(from_addr)
         .transpose()?
         .unwrap_or(0))
