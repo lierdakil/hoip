@@ -4,7 +4,7 @@ use anyhow::Context;
 use clap::Parser;
 use evdev::{
     AttributeSet, BusType, EventType, InputEvent, InputId, KeyCode, PropType, RelativeAxisCode,
-    uinput::VirtualDevice,
+    SynchronizationCode, uinput::VirtualDevice,
 };
 use futures::{TryFutureExt, TryStreamExt};
 use hid_over_ip::{
@@ -106,22 +106,31 @@ impl<'a> App<'a> {
                 .await
                 .context("Bind TCP listener")?;
             tracing::info!(address = %this.config.listen, "Started listener");
-            let (res, ()) = tokio::try_join!(listener.accept().err_into(), this.disc.advertise())
-                .context("Listener accept/advertise")?;
-            res
+            tokio::try_join!(listener.accept().err_into(), this.disc.advertise())
+                .context("Listener accept/advertise")?
+                .0
         };
         tracing::info!(%remote, "Accepted remote connection");
         let mut framed = Framed::new(tcp_stream, Codec);
         tracing::info!("Starting event loop");
+        let mut buf = Vec::with_capacity(16);
         while let Some(next) = framed.try_next().await.context("Get next data frame")? {
-            if let evdev::EventSummary::Key(_, key_code, value) = next.destructure() {
-                if matches!(value, 0) {
-                    this.pressed_keys.remove(&key_code);
-                } else {
-                    this.pressed_keys.insert(key_code);
+            match next.destructure() {
+                evdev::EventSummary::Key(_, key_code, value) => {
+                    if matches!(value, 0) {
+                        this.pressed_keys.remove(&key_code);
+                    } else {
+                        this.pressed_keys.insert(key_code);
+                    }
                 }
+                evdev::EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, 0) => {
+                    this.dev.emit(&buf).context("Emit events")?;
+                    buf.clear();
+                    continue;
+                }
+                _ => (),
             }
-            this.dev.emit(&[next]).context("Emit event")?;
+            buf.push(next);
         }
         tracing::info!(%remote, "Connection closed normally");
         anyhow::Ok(())
