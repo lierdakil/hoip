@@ -112,7 +112,7 @@ impl Discovery {
                 .recv_from(&mut buf)
                 .await
                 .context("Recv request from multicast socket")?;
-            if !matches!(buf.get(..sz), Some(DISC_REQ_REF)) {
+            if !matches!(sz, DISC_LEN) || !matches!(&buf[..sz], DISC_REQ_REF) {
                 continue;
             }
             tracing::info!(
