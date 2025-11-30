@@ -1,11 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque, btree_map::Entry},
-    net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6},
+    net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6, ToSocketAddrs},
     process::ExitCode,
     time::Duration,
 };
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use clap::Parser;
 use evdev::{EventSummary, InputEvent, KeyCode};
 use futures::{SinkExt, Stream, StreamExt, TryStream, TryStreamExt};
@@ -32,7 +32,7 @@ struct Cli {
     /// Clients to send events to. Only one client can be active at a time, will
     /// round-robin between them. If unspecified, LAN multicast discovery will
     /// be used.
-    #[arg(long, short)]
+    #[arg(long, short, value_parser = parse_socketaddr)]
     connect: Vec<SocketAddr>,
     /// List devices and exit.
     #[arg(long, short, conflicts_with_all = ["device", "connect"])]
@@ -78,6 +78,12 @@ struct Cli {
     /// suddenly come online.
     #[arg(long, default_value = "3s", value_parser = humantime::parse_duration)]
     discovery_timeout: Duration,
+}
+
+fn parse_socketaddr(addr: &str) -> anyhow::Result<SocketAddr> {
+    addr.to_socket_addrs()?
+        .next()
+        .ok_or_else(|| anyhow!("{addr} did not resolve to an address"))
 }
 
 enum Error {
