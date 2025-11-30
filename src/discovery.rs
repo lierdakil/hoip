@@ -9,6 +9,48 @@ use futures::{Stream, never::Never};
 
 pub const DEFAULT_MULTICAST_SOCKET_V4: &str = "224.0.0.83:27056";
 pub const DEFAULT_MULTICAST_SOCKET_V6: &str = "[ff02::686F:6970]:27056";
+const DISC_REQ: [u8; 7] = [b'H', b'O', b'I', b'P', 0, 0, DISC_CRC];
+const DISC_REQ_REF: &[u8] = &DISC_REQ;
+const DISC_PFX: &[u8] = b"HOIP";
+const DISC_LEN: usize = DISC_REQ.len();
+const CRC8: Crc8 = Crc8::create(0x9b);
+const DISC_CRC: u8 = CRC8.calc(b"HOIP\0\0", 0);
+
+pub struct Crc8([u8; 256]);
+
+impl Crc8 {
+    pub const fn create(polynomial: u8) -> Crc8 {
+        let mut table = [0u8; 256];
+        let mut crc = 0x80;
+        let mut i = 1u8;
+        while i > 0 {
+            crc = (crc << 1) ^ if crc & 0x80 != 0 { polynomial } else { 0 };
+            let mut j = 0;
+            while j < i {
+                table[i.wrapping_add(j) as usize] = crc ^ table[j as usize];
+                j += 1;
+            }
+            i <<= 1;
+        }
+        Crc8(table)
+    }
+
+    pub const fn calc(&self, buffer: &[u8], mut crc: u8) -> u8 {
+        let mut i = 0;
+        while i < buffer.len() {
+            crc = self.0[(crc ^ buffer[i]) as usize];
+            i += 1;
+        }
+        crc
+    }
+}
+
+fn enc(port: u16) -> [u8; DISC_LEN] {
+    let mut buf = DISC_REQ;
+    buf[4..6].copy_from_slice(&port.to_be_bytes());
+    buf[6] = CRC8.calc(&buf[..6], 0);
+    buf
+}
 
 pub struct Discovery {
     bind: SocketAddr,
@@ -70,7 +112,7 @@ impl Discovery {
                 .recv_from(&mut buf)
                 .await
                 .context("Recv request from multicast socket")?;
-            if !matches!(sz, 2) || !matches!(buf[..2], [0, 0]) {
+            if !matches!(buf.get(..sz), Some(DISC_REQ_REF)) {
                 continue;
             }
             tracing::info!(
@@ -80,7 +122,7 @@ impl Discovery {
             );
             self.socket
                 .send_to(
-                    &self.bind.port().to_be_bytes(),
+                    &enc(self.bind.port()),
                     SocketAddr::new(addr.ip(), self.disc_mcst.port()),
                 )
                 .await
@@ -95,7 +137,7 @@ impl Discovery {
 
     pub async fn advertise(&self) -> anyhow::Result<()> {
         self.socket
-            .send_to(&self.bind.port().to_be_bytes(), self.disc_mcst)
+            .send_to(&enc(self.bind.port()), self.disc_mcst)
             .await
             .context("Advertise to UDP socket")?;
         tracing::info!(
@@ -116,7 +158,7 @@ impl Discovery {
                 "Broadcast discovery request"
             );
             self.socket
-                .send_to(&[0, 0], self.disc_mcst)
+                .send_to(&DISC_REQ, self.disc_mcst)
                 .await
                 .context("Send discovery request to UDP socket")?;
         }
@@ -133,10 +175,16 @@ impl Discovery {
                     Err(e) => return Poll::Ready(Some(Err(e.into()))),
                 };
                 let buf_trunc = buf_read.filled();
-                if !matches!(buf_trunc.len(), 2) {
+                if !matches!(buf_trunc.len(), DISC_LEN)
+                    || !matches!(&buf_trunc[..DISC_PFX.len()], DISC_PFX)
+                {
                     continue;
                 }
-                let port = u16::from_be_bytes([buf_trunc[0], buf_trunc[1]]);
+                let cksm = CRC8.calc(&buf_trunc[..6], 0);
+                if cksm != buf_trunc[6] {
+                    continue;
+                }
+                let port = u16::from_be_bytes([buf_trunc[4], buf_trunc[5]]);
                 if matches!(port, 0) {
                     continue;
                 }
