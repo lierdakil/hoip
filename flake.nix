@@ -60,7 +60,7 @@
               RUST_SRC_PATH = pkgs.rustPlatform.rustLibSrc;
             };
             packages.default = pkgs.hid-over-ip;
-            packages.static = pkgs.pkgsStatic.hid-over-ip;
+            legacyPackages.pkgsStatic.hid-over-ip = pkgs.pkgsStatic.hid-over-ip;
             legacyPackages.pkgsCross = nixpkgs.lib.mapAttrs (_: v: {
               inherit (v) hid-over-ip;
               pkgsStatic = {

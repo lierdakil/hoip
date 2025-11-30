@@ -1,63 +1,17 @@
-use std::{collections::BTreeSet, net::SocketAddr, process::ExitCode};
+use std::collections::BTreeSet;
 
 use anyhow::Context;
-use clap::Parser;
 use evdev::{
-    AttributeSet, BusType, EventType, InputEvent, InputId, KeyCode, PropType, RelativeAxisCode,
+    AttributeSet, EventType, InputEvent, InputId, KeyCode, PropType, RelativeAxisCode,
     SynchronizationCode, uinput::VirtualDevice,
 };
 use futures::{TryFutureExt, TryStreamExt};
-use hid_over_ip::{
-    codec::Codec,
-    discovery::{DEFAULT_MULTICAST_SOCKET_V4, Discovery},
-    init_logging,
-};
+use hid_over_ip::{codec::Codec, discovery::Discovery};
 use tokio_util::codec::Framed;
 
-/// HoIP -- HID-over-IP. Share keyboard and mouse (or other HID inputs) over
-/// TCP/IP.
-///
-/// HoIP "client". Will receive input events from the "server" and pass them
-/// through to the system it runs on via a virtual input device.
-#[derive(clap::Parser)]
-#[command(version)]
-struct Cli {
-    /// Address/port to listen on. `0.0.0.0` is any v4 address, `[::]` is
-    /// usually any address, v4 or v6 (but depends on `net.ipv6.bindv6only`
-    /// sysctl)
-    #[arg(long, short, default_value = "[::]:27056")]
-    listen: SocketAddr,
-    /// Name of the virtual device.
-    #[arg(long, short, default_value = "hoipc")]
-    name: String,
-    /// Bus type of the virtual device.
-    #[arg(long, short, default_value = "BUS_USB")]
-    bus: BusType,
-    /// Vendor ID of the virtual device.
-    #[arg(long, short, default_value_t = 1)]
-    vendor_id: u16,
-    /// Product ID of the virtual device.
-    #[arg(long, short, default_value_t = 1)]
-    product_id: u16,
-    /// Product version of the virtual device.
-    #[arg(long, default_value_t = 1)]
-    product_version: u16,
-    /// Disable high-resolution scrolling events in the device description.
-    #[arg(long)]
-    no_high_res_scroll: bool,
-    /// What multicast address to use for peer discovery. If listen address is a
-    /// V6-only address, and this is not, will default to a V6 multicast
-    /// address.
-    #[arg(long, default_value = DEFAULT_MULTICAST_SOCKET_V4)]
-    discovery_multicast: SocketAddr,
-    /// Which network interface to run discovery on. If unspecified, will try to
-    /// choose based on listen address if possible. Only used for IPv6
-    /// multicast.
-    #[arg(long)]
-    discovery_ifname: Option<String>,
-}
+use crate::Cli;
 
-struct App<'a> {
+pub struct App<'a> {
     config: &'a Cli,
     disc: &'a Discovery,
     dev: VirtualDevice,
@@ -65,6 +19,15 @@ struct App<'a> {
 }
 
 impl<'a> App<'a> {
+    pub async fn run(config: &Cli, disc: &Discovery) -> anyhow::Result<()> {
+        let mut app = App::new(config, disc).context("Construct App")?;
+        loop {
+            if let Err(e) = app.connect_loop().await {
+                tracing::error!("{e:?}");
+            }
+        }
+    }
+
     fn new(config: &'a Cli, disc: &'a Discovery) -> anyhow::Result<Self> {
         Ok(Self {
             dev: {
@@ -134,50 +97,6 @@ impl<'a> App<'a> {
         }
         tracing::info!(%remote, "Connection closed normally");
         anyhow::Ok(())
-    }
-}
-
-#[tokio::main]
-async fn main() -> ExitCode {
-    init_logging();
-
-    let config = Cli::parse();
-    let ctrl_c = tokio::signal::ctrl_c();
-
-    match main_imp(config, ctrl_c).await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(e) => {
-            tracing::error!("{e:?}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-async fn main_imp(mut config: Cli, ctrl_c: impl Future) -> anyhow::Result<()> {
-    hid_over_ip::fix_socket_addr_iface(
-        &mut config.listen,
-        &mut config.discovery_multicast,
-        config.discovery_ifname.as_deref(),
-        false,
-    )?;
-
-    let disc = Discovery::new(config.discovery_multicast, config.listen)
-        .await
-        .context("Bind discovery")?;
-
-    tokio::select! {
-        _ = ctrl_c => Ok(()),
-        res = disc.respond() => res,
-        res = imp(&config, &disc) => res,
-    }
-}
-
-async fn imp(config: &Cli, disc: &Discovery) -> anyhow::Result<()> {
-    let mut app = App::new(config, disc).context("Construct App")?;
-    loop {
-        if let Err(e) = app.connect_loop().await {
-            tracing::error!("{e:?}");
-        }
     }
 }
 

@@ -1,3 +1,6 @@
+mod crc;
+mod packet;
+
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     task::Poll,
@@ -7,101 +10,11 @@ use std::{
 use anyhow::Context;
 use futures::{Stream, never::Never};
 
+use self::packet::Packet;
+
 pub const DEFAULT_MULTICAST_SOCKET_V4: &str = "224.0.0.83:27056";
 pub const DEFAULT_MULTICAST_SOCKET_V6: &str = "[ff02::686F:6970]:27056";
-const DISC_REQ: Packet = Packet::new(0);
-const DISC_REQ_REF: &[u8] = DISC_REQ.as_bytes();
-const DISC_PFX: [u8; 4] = *b"HOIP";
-const CRC8: Crc8 = Crc8::create(0x9b);
-
-pub struct Crc8([u8; 256]);
-
-impl Crc8 {
-    pub const fn create(polynomial: u8) -> Crc8 {
-        let mut table = [0u8; 256];
-        let mut crc = 0x80;
-        let mut i = 1u8;
-        while i > 0 {
-            crc = (crc << 1) ^ if crc & 0x80 != 0 { polynomial } else { 0 };
-            let mut j = 0;
-            while j < i {
-                table[i.wrapping_add(j) as usize] = crc ^ table[j as usize];
-                j += 1;
-            }
-            i <<= 1;
-        }
-        Crc8(table)
-    }
-
-    pub const fn calc(&self, buffer: &[u8], len: usize, mut crc: u8) -> u8 {
-        let mut i = 0;
-        while i < len {
-            crc = self.0[(crc ^ buffer[i]) as usize];
-            i += 1;
-        }
-        crc
-    }
-}
-
-#[repr(C, packed(1))]
-struct Packet {
-    pfx: [u8; 4],
-    port: u16,
-    crc: u8,
-}
-
-impl Packet {
-    const fn new(port: u16) -> Self {
-        let mut this = Self {
-            pfx: DISC_PFX,
-            port,
-            crc: 0,
-        };
-        this.update_crc();
-        this
-    }
-
-    const fn update_crc(&mut self) {
-        self.crc = self.crc();
-    }
-
-    const fn as_bytes(&self) -> &[u8; size_of::<Self>()] {
-        assert!(align_of::<Self>() == 1);
-        // SAFETY: tightly packed, hence casting to &[u8; size_of()] is valid.
-        unsafe { &*(self as *const Self as *const [u8; size_of::<Self>()]) }
-    }
-
-    const fn try_from_bytes(bytes: &[u8]) -> Option<&Self> {
-        assert!(align_of::<Self>() == 1);
-        if bytes.len() != size_of::<Self>() {
-            return None;
-        }
-        // SAFETY: all bit-patterns are valid for Packet, we asserted slice len
-        // is exactly right, Packet is tightly packed, we asserted it's aligned.
-        let pkt = unsafe { &*(bytes.as_ptr() as *const Self) };
-        if !matches!(pkt.pfx, DISC_PFX) || !pkt.validate_crc() {
-            return None;
-        }
-        Some(pkt)
-    }
-
-    const fn validate_crc(&self) -> bool {
-        self.crc == self.crc()
-    }
-
-    const fn crc(&self) -> u8 {
-        let bytes = self.as_bytes();
-        CRC8.calc(bytes, bytes.len() - 1, 0)
-    }
-}
-
-impl std::ops::Deref for Packet {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        self.as_bytes()
-    }
-}
+const DISC_REQ_REF: &[u8] = Packet::REQUEST.as_bytes();
 
 pub struct Discovery {
     bind: SocketAddr,
@@ -114,6 +27,7 @@ impl Discovery {
         mut discovery_multicast: SocketAddr,
         bind_addr: SocketAddr,
     ) -> anyhow::Result<Self> {
+        // this weirdness instead of SocketAddr::new to preserve scope_id.
         let mut discovery_sock = bind_addr;
         discovery_sock.set_port(discovery_multicast.port());
         let socket = tokio::net::UdpSocket::bind(discovery_sock)
@@ -209,7 +123,7 @@ impl Discovery {
                 "Broadcast discovery request"
             );
             self.socket
-                .send_to(DISC_REQ.as_bytes(), self.disc_mcst)
+                .send_to(DISC_REQ_REF, self.disc_mcst)
                 .await
                 .context("Send discovery request to UDP socket")?;
         }
@@ -228,7 +142,7 @@ impl Discovery {
                 let Some(pkt) = Packet::try_from_bytes(buf.filled()) else {
                     continue;
                 };
-                if matches!(pkt.port, 0) {
+                if pkt.is_request() {
                     continue;
                 }
                 break (pkt.port, addr.ip());

@@ -1,21 +1,26 @@
+mod dump_evts;
+mod magic;
+
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet, VecDeque, btree_map::Entry},
+    collections::{BTreeSet, HashSet, VecDeque},
     net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     process::ExitCode,
+    sync::Mutex,
     time::Duration,
 };
 
 use anyhow::{Context, anyhow};
 use clap::Parser;
-use evdev::{EventSummary, InputEvent, KeyCode};
-use futures::{SinkExt, Stream, StreamExt, TryStream, TryStreamExt};
+use evdev::KeyCode;
+use futures::{SinkExt, StreamExt, TryStreamExt};
 use hid_over_ip::{
     codec::Codec,
     discovery::{DEFAULT_MULTICAST_SOCKET_V4, Discovery},
     init_logging,
 };
-use tokio::sync::Mutex;
 use tokio_util::codec::Framed;
+
+use self::magic::Magic;
 
 /// HoIP -- HID-over-IP. Share keyboard and mouse (or other HID inputs) over
 /// TCP/IP.
@@ -86,43 +91,6 @@ fn parse_socketaddr(addr: &str) -> anyhow::Result<SocketAddr> {
         .ok_or_else(|| anyhow!("{addr} did not resolve to an address"))
 }
 
-enum Error {
-    MagicKey,
-    Other(anyhow::Error),
-}
-
-impl From<anyhow::Error> for Error {
-    fn from(error: anyhow::Error) -> Self {
-        Error::Other(error)
-    }
-}
-
-struct Magic {
-    keys: BTreeMap<KeyCode, i32>,
-    armed: bool,
-}
-
-impl Magic {
-    fn from_iter<'a>(iter: impl IntoIterator<Item = &'a KeyCode>) -> Self {
-        Self {
-            keys: BTreeMap::from_iter(iter.into_iter().map(|k| (*k, 0))),
-            armed: false,
-        }
-    }
-
-    fn key(&mut self, key_code: KeyCode, value: i32) -> bool {
-        if let Entry::Occupied(mut entry) = self.keys.entry(key_code) {
-            entry.insert(value);
-            if self.armed && self.keys.values().all(|v| *v == 0) {
-                self.armed = false;
-                return true;
-            }
-            self.armed |= self.keys.values().all(|v| *v != 0);
-        }
-        false
-    }
-}
-
 #[tokio::main]
 async fn main() -> ExitCode {
     init_logging();
@@ -142,10 +110,8 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let ctrl_c = tokio::signal::ctrl_c();
-
     tokio::select! {
-        _ = ctrl_c => ExitCode::SUCCESS,
+        _ = tokio::signal::ctrl_c() => ExitCode::SUCCESS,
         res = imp(config) => match res {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
@@ -202,33 +168,11 @@ async fn imp(mut config: Cli) -> anyhow::Result<()> {
         .collect::<Result<_, _>>()
         .context("Collect event streams")?;
 
-    let udev_stream = Mutex::new(futures::stream::select_all(streams).err_into());
+    let mut udev_stream = futures::stream::select_all(streams).err_into();
 
     if config.dump_events {
-        return dump_events(&mut *udev_stream.lock().await).await;
+        return dump_evts::dump_events(&mut udev_stream).await;
     }
-
-    let connect = async |connect| {
-        let tcp_stream = tokio::net::TcpStream::connect(connect)
-            .await
-            .context("Open TCP stream")?;
-        tracing::info!(remote = %connect, "Connected to remote");
-        let mut framed = Framed::new(tcp_stream, Codec).sink_map_err(Error::Other);
-        let udev_stream = &mut *udev_stream.lock().await;
-        for dev in udev_stream.get_mut().iter_mut() {
-            dev.device_mut().grab().context("Grab device")?;
-        }
-        tracing::info!("Grabbed devices");
-        let mut magic = Magic::from_iter(&config.magic_key);
-        let mut udev_stream = udev_stream.map(|evt| match evt.as_ref().map(|x| x.destructure()) {
-            Ok(EventSummary::Key(_, key_code, value)) if magic.key(key_code, value) => {
-                Err(Error::MagicKey)
-            }
-            _ => evt.map_err(Error::Other),
-        });
-        framed.send_all(&mut udev_stream).await?;
-        Ok::<_, Error>(())
-    };
 
     let discovery;
     let invalid_peers = Mutex::new(BTreeSet::<SocketAddr>::new());
@@ -246,8 +190,9 @@ async fn imp(mut config: Cli) -> anyhow::Result<()> {
         });
         let return_on_timeout = futures::stream::unfold(st, |mut st| async {
             {
-                let bad = &invalid_peers.lock().await;
+                let mut bad = invalid_peers.lock().unwrap();
                 st.cache.retain(|elt| !bad.contains(elt));
+                bad.clear();
             }
             let try_next = async {
                 loop {
@@ -290,7 +235,7 @@ async fn imp(mut config: Cli) -> anyhow::Result<()> {
 
     loop {
         if do_wait {
-            wait_magic(&config, &mut *udev_stream.lock().await)
+            Magic::wait(&config.magic_key, &mut udev_stream)
                 .await
                 .context("Waiting for magic")?;
         }
@@ -306,21 +251,19 @@ async fn imp(mut config: Cli) -> anyhow::Result<()> {
         };
         tracing::info!(remote = %remote, "Connecting...");
         let mut magic = false;
-        if let Err(e) = connect(remote).await {
+        if let Err(e) = connect(remote, &config.magic_key, &mut udev_stream).await {
             match e {
-                Error::MagicKey => {
+                magic::Error::MagicKey => {
                     tracing::info!("Magic key pressed");
                     magic = true;
                 }
-                Error::Other(e) => {
-                    invalid_peers.lock().await.insert(remote);
+                magic::Error::Other(e) => {
+                    invalid_peers.lock().unwrap().insert(remote);
                     tracing::error!("{e:?}");
                 }
             }
         }
         let is_grabbed = udev_stream
-            .lock()
-            .await
             .get_mut()
             .iter()
             .any(|x| x.device().is_grabbed());
@@ -331,11 +274,11 @@ async fn imp(mut config: Cli) -> anyhow::Result<()> {
             if !magic {
                 // connection terminated unexpectedly. to prevent
                 // surprises, wait for magic key, then ungrab.
-                wait_magic(&config, &mut *udev_stream.lock().await)
+                Magic::wait(&config.magic_key, &mut udev_stream)
                     .await
                     .context("Wating for magic")?;
             }
-            for dev in udev_stream.lock().await.get_mut().iter_mut() {
+            for dev in udev_stream.get_mut().iter_mut() {
                 dev.device_mut().ungrab().context("Ungrab device")?;
             }
             tracing::info!("Ungrabbed devices");
@@ -343,65 +286,25 @@ async fn imp(mut config: Cli) -> anyhow::Result<()> {
     }
 }
 
-async fn wait_magic(
-    config: &Cli,
-    mut stream: impl Stream<Item = anyhow::Result<InputEvent>> + Unpin,
-) -> Result<(), anyhow::Error> {
-    tracing::info!("Waiting for magic key...");
-    let mut magic = Magic::from_iter(&config.magic_key);
-    while let Some(evt) = stream
-        .try_next()
+async fn connect(
+    connect: SocketAddr,
+    magic_key: &[KeyCode],
+    udev_stream: &mut futures::stream::ErrInto<
+        futures::stream::SelectAll<evdev::EventStream>,
+        anyhow::Error,
+    >,
+) -> Result<(), magic::Error<anyhow::Error>> {
+    let tcp_stream = tokio::net::TcpStream::connect(connect)
         .await
-        .context("Monitoring input for magic")?
-    {
-        if let EventSummary::Key(_, key_code, value) = evt.destructure()
-            && magic.key(key_code, value)
-        {
-            tracing::info!("Magic key pressed");
-            break;
-        }
+        .context("Open TCP stream")?;
+    tracing::info!(remote = %connect, "Connected to remote");
+    let mut framed = Framed::new(tcp_stream, Codec).sink_err_into();
+    for dev in udev_stream.get_mut().iter_mut() {
+        dev.device_mut().grab().context("Grab device")?;
     }
-    Ok(())
-}
-
-async fn dump_events(
-    udev_stream: &mut (impl TryStream<Ok = InputEvent, Error = anyhow::Error> + Unpin),
-) -> anyhow::Result<()> {
-    while let Some(event) = udev_stream
-        .try_next()
-        .await
-        .context("Monitoring events to dump")?
-    {
-        macro_rules! dump {
-            ($($i:ident),* $(,)*) => {
-                match event.destructure() {
-                    $(
-                    EventSummary::$i(event, code, value) => {
-                        println!(
-                            "type={:?} code={code:?} value={value}",
-                            event.event_type(),
-                        );
-                    }
-                    )*
-                }
-            };
-        }
-        dump!(
-            Synchronization,
-            Key,
-            RelativeAxis,
-            AbsoluteAxis,
-            Misc,
-            Switch,
-            Led,
-            Sound,
-            Repeat,
-            ForceFeedback,
-            Power,
-            ForceFeedbackStatus,
-            UInput,
-            Other,
-        );
-    }
-    Ok(())
+    tracing::info!("Grabbed devices");
+    framed
+        .send_all(&mut Magic::map_stream(magic_key, udev_stream))
+        .await?;
+    Ok::<_, magic::Error<_>>(())
 }

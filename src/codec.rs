@@ -14,12 +14,9 @@ impl Encoder<InputEvent> for Codec {
         item: InputEvent,
         dst: &mut tokio_util::bytes::BytesMut,
     ) -> Result<(), Self::Error> {
-        let t: u16 = item.event_type().0;
-        let c: u16 = item.code();
-        let v: i32 = item.value();
-        dst.put_u16(t);
-        dst.put_u16(c);
-        dst.put_i32(v);
+        dst.put_u16(item.event_type().0);
+        dst.put_u16(item.code());
+        dst.put_i32(item.value());
         Ok(())
     }
 }
@@ -36,10 +33,11 @@ impl Decoder for Codec {
         if src.remaining() < 8 {
             Ok(None)
         } else {
-            let t = src.get_u16();
-            let c = src.get_u16();
-            let v = src.get_i32();
-            Ok(Some(InputEvent::new_now(t, c, v)))
+            Ok(Some(InputEvent::new_now(
+                src.get_u16(),
+                src.get_u16(),
+                src.get_i32(),
+            )))
         }
     }
 }
