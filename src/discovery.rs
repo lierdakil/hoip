@@ -9,12 +9,10 @@ use futures::{Stream, never::Never};
 
 pub const DEFAULT_MULTICAST_SOCKET_V4: &str = "224.0.0.83:27056";
 pub const DEFAULT_MULTICAST_SOCKET_V6: &str = "[ff02::686F:6970]:27056";
-const DISC_REQ: [u8; 7] = [b'H', b'O', b'I', b'P', 0, 0, DISC_CRC];
-const DISC_REQ_REF: &[u8] = &DISC_REQ;
-const DISC_PFX: &[u8] = b"HOIP";
-const DISC_LEN: usize = DISC_REQ.len();
+const DISC_REQ: Packet = Packet::new(0);
+const DISC_REQ_REF: &[u8] = DISC_REQ.as_bytes();
+const DISC_PFX: [u8; 4] = *b"HOIP";
 const CRC8: Crc8 = Crc8::create(0x9b);
-const DISC_CRC: u8 = CRC8.calc(b"HOIP\0\0", 0);
 
 pub struct Crc8([u8; 256]);
 
@@ -35,9 +33,9 @@ impl Crc8 {
         Crc8(table)
     }
 
-    pub const fn calc(&self, buffer: &[u8], mut crc: u8) -> u8 {
+    pub const fn calc(&self, buffer: &[u8], len: usize, mut crc: u8) -> u8 {
         let mut i = 0;
-        while i < buffer.len() {
+        while i < len {
             crc = self.0[(crc ^ buffer[i]) as usize];
             i += 1;
         }
@@ -45,11 +43,64 @@ impl Crc8 {
     }
 }
 
-fn enc(port: u16) -> [u8; DISC_LEN] {
-    let mut buf = DISC_REQ;
-    buf[4..6].copy_from_slice(&port.to_be_bytes());
-    buf[6] = CRC8.calc(&buf[..6], 0);
-    buf
+#[repr(C, packed(1))]
+struct Packet {
+    pfx: [u8; 4],
+    port: u16,
+    crc: u8,
+}
+
+impl Packet {
+    const fn new(port: u16) -> Self {
+        let mut this = Self {
+            pfx: DISC_PFX,
+            port,
+            crc: 0,
+        };
+        this.update_crc();
+        this
+    }
+
+    const fn update_crc(&mut self) {
+        self.crc = self.crc();
+    }
+
+    const fn as_bytes(&self) -> &[u8; size_of::<Self>()] {
+        assert!(align_of::<Self>() == 1);
+        // SAFETY: tightly packed, hence casting to &[u8; size_of()] is valid.
+        unsafe { &*(self as *const Self as *const [u8; size_of::<Self>()]) }
+    }
+
+    const fn try_from_bytes(bytes: &[u8]) -> Option<&Self> {
+        assert!(align_of::<Self>() == 1);
+        if bytes.len() != size_of::<Self>() {
+            return None;
+        }
+        // SAFETY: all bit-patterns are valid for Packet, we asserted slice len
+        // is exactly right, Packet is tightly packed, we asserted it's aligned.
+        let pkt = unsafe { &*(bytes.as_ptr() as *const Self) };
+        if !matches!(pkt.pfx, DISC_PFX) || !pkt.validate_crc() {
+            return None;
+        }
+        Some(pkt)
+    }
+
+    const fn validate_crc(&self) -> bool {
+        self.crc == self.crc()
+    }
+
+    const fn crc(&self) -> u8 {
+        let bytes = self.as_bytes();
+        CRC8.calc(bytes, bytes.len() - 1, 0)
+    }
+}
+
+impl std::ops::Deref for Packet {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_bytes()
+    }
 }
 
 pub struct Discovery {
@@ -105,14 +156,14 @@ impl Discovery {
     }
 
     pub async fn respond(&self) -> anyhow::Result<()> {
-        let mut buf = [0u8; DISC_LEN + 1];
+        let mut buf = [0u8; size_of::<Packet>() + 1];
         loop {
             let (sz, addr) = self
                 .socket
                 .recv_from(&mut buf)
                 .await
                 .context("Recv request from multicast socket")?;
-            if !matches!(sz, DISC_LEN) || !matches!(&buf[..sz], DISC_REQ_REF) {
+            if sz != size_of::<Packet>() || !matches!(&buf[..sz], DISC_REQ_REF) {
                 continue;
             }
             tracing::info!(
@@ -122,7 +173,7 @@ impl Discovery {
             );
             self.socket
                 .send_to(
-                    &enc(self.bind.port()),
+                    &Packet::new(self.bind.port()),
                     SocketAddr::new(addr.ip(), self.disc_mcst.port()),
                 )
                 .await
@@ -137,7 +188,7 @@ impl Discovery {
 
     pub async fn advertise(&self) -> anyhow::Result<()> {
         self.socket
-            .send_to(&enc(self.bind.port()), self.disc_mcst)
+            .send_to(&Packet::new(self.bind.port()), self.disc_mcst)
             .await
             .context("Advertise to UDP socket")?;
         tracing::info!(
@@ -158,37 +209,29 @@ impl Discovery {
                 "Broadcast discovery request"
             );
             self.socket
-                .send_to(&DISC_REQ, self.disc_mcst)
+                .send_to(DISC_REQ.as_bytes(), self.disc_mcst)
                 .await
                 .context("Send discovery request to UDP socket")?;
         }
     }
 
     pub fn discovered(&self) -> impl Stream<Item = anyhow::Result<SocketAddr>> {
-        let mut buf = [0u8; DISC_LEN + 1];
+        let mut buf = [0u8; size_of::<Packet>() + 1];
         futures::stream::poll_fn(move |cx| {
-            let mut buf_read = tokio::io::ReadBuf::new(&mut buf);
+            let mut buf = tokio::io::ReadBuf::new(&mut buf);
             let (port, ip) = loop {
-                let recv = futures::ready!(self.socket.poll_recv_from(cx, &mut buf_read));
+                let recv = futures::ready!(self.socket.poll_recv_from(cx, &mut buf));
                 let addr = match recv {
                     Ok(x) => x,
                     Err(e) => return Poll::Ready(Some(Err(e.into()))),
                 };
-                let buf_trunc = buf_read.filled();
-                if !matches!(buf_trunc.len(), DISC_LEN)
-                    || !matches!(&buf_trunc[..DISC_PFX.len()], DISC_PFX)
-                {
+                let Some(pkt) = Packet::try_from_bytes(buf.filled()) else {
+                    continue;
+                };
+                if matches!(pkt.port, 0) {
                     continue;
                 }
-                let cksm = CRC8.calc(&buf_trunc[..6], 0);
-                if cksm != buf_trunc[6] {
-                    continue;
-                }
-                let port = u16::from_be_bytes([buf_trunc[4], buf_trunc[5]]);
-                if matches!(port, 0) {
-                    continue;
-                }
-                break (port, addr.ip());
+                break (pkt.port, addr.ip());
             };
             let mut sock_addr = SocketAddr::new(ip, port);
             if let SocketAddr::V6(sock_addr) = &mut sock_addr
