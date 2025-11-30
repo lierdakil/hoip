@@ -279,8 +279,8 @@ async fn imp(mut config: Cli) -> anyhow::Result<()> {
                     break Some(next);
                 }
             };
-            let discover = discovery.discover(Duration::from_millis(300));
-            let timeout = tokio::time::sleep(Duration::from_secs(1));
+            let discover = discovery.discover(config.discovery_request_period);
+            let timeout = tokio::time::sleep(config.discovery_cache_timeout);
             let value = tokio::select! {
                 peer = try_next => Some(peer?),
                 err = discover => Some(err.map(|never| match never {})),
@@ -312,7 +312,7 @@ async fn imp(mut config: Cli) -> anyhow::Result<()> {
                 .await
                 .context("Waiting for magic")?;
         }
-        let Ok(remote) = tokio::time::timeout(Duration::from_secs(3), remotes.try_next()).await
+        let Ok(remote) = tokio::time::timeout(config.discovery_timeout, remotes.try_next()).await
         else {
             // timed out
             tracing::warn!("No remote found, timeout elapsed");
