@@ -11,7 +11,7 @@ pub const DEFAULT_MULTICAST_SOCKET_V4: &str = "224.0.0.83:27056";
 pub const DEFAULT_MULTICAST_SOCKET_V6: &str = "[ff02::686F:6970]:27056";
 
 pub struct Discovery {
-    port: [u8; 2],
+    bind: SocketAddr,
     socket: tokio::net::UdpSocket,
     disc_mcst: SocketAddr,
 }
@@ -19,7 +19,6 @@ pub struct Discovery {
 impl Discovery {
     pub async fn new(
         mut discovery_multicast: SocketAddr,
-        discovery_ifname: Option<&str>,
         bind_addr: SocketAddr,
     ) -> anyhow::Result<Self> {
         let mut discovery_sock = bind_addr;
@@ -28,10 +27,10 @@ impl Discovery {
             .await
             .context("Bind UDP socket")?;
         match &mut discovery_multicast {
-            SocketAddr::V4(ipv4_addr) => {
+            SocketAddr::V4(mcast_v4) => {
                 socket
                     .join_multicast_v4(
-                        *ipv4_addr.ip(),
+                        *mcast_v4.ip(),
                         match bind_addr.ip() {
                             IpAddr::V4(ipv4_addr) => ipv4_addr,
                             IpAddr::V6(_) => Ipv4Addr::UNSPECIFIED,
@@ -39,13 +38,15 @@ impl Discovery {
                     )
                     .context("Join V4 multicast")?;
             }
-            SocketAddr::V6(ipv6_addr) => {
-                let iface =
-                    guess_iface(bind_addr, discovery_ifname).context("Guess V6 interface")?;
+            SocketAddr::V6(mcast_v6) => {
+                let iface = match bind_addr {
+                    SocketAddr::V4(_) => anyhow::bail!("Bind address is V4 but multicast is V6"),
+                    SocketAddr::V6(v6) => v6.scope_id(),
+                };
                 socket
-                    .join_multicast_v6(ipv6_addr.ip(), iface)
+                    .join_multicast_v6(mcast_v6.ip(), iface)
                     .context("Join V6 multicast")?;
-                ipv6_addr.set_scope_id(iface);
+                mcast_v6.set_scope_id(iface);
             }
         }
         socket
@@ -56,7 +57,7 @@ impl Discovery {
             .context("Disable V6 multicast loop")?;
         Ok(Self {
             socket,
-            port: bind_addr.port().to_be_bytes(),
+            bind: bind_addr,
             disc_mcst: discovery_multicast,
         })
     }
@@ -79,15 +80,14 @@ impl Discovery {
             );
             self.socket
                 .send_to(
-                    &self.port,
+                    &self.bind.port().to_be_bytes(),
                     SocketAddr::new(addr.ip(), self.disc_mcst.port()),
                 )
                 .await
                 .context("Send response to UDP socket")?;
             tracing::info!(
                 requester = %addr.ip(),
-                self_addr = %self.socket.local_addr().context("Get socket local address")?.ip(),
-                port = u16::from_be_bytes(self.port),
+                self_addr = %self.bind,
                 "Responded to discovery request"
             );
         }
@@ -95,13 +95,12 @@ impl Discovery {
 
     pub async fn advertise(&self) -> anyhow::Result<()> {
         self.socket
-            .send_to(&self.port, self.disc_mcst)
+            .send_to(&self.bind.port().to_be_bytes(), self.disc_mcst)
             .await
             .context("Advertise to UDP socket")?;
         tracing::info!(
-            self_addr = %self.socket.local_addr().context("Get socket local address")?.ip(),
+            self_addr = %self.bind,
             multicast_socket = %self.disc_mcst,
-            port = u16::from_be_bytes(self.port),
             "Discovery advertisement"
         );
         Ok(())
@@ -157,44 +156,4 @@ impl Discovery {
             Poll::Ready(Some(Ok(sock_addr)))
         })
     }
-}
-
-pub fn guess_iface(bind_addr: SocketAddr, discovery_ifname: Option<&str>) -> anyhow::Result<u32> {
-    let from_addr = || {
-        let SocketAddr::V6(bind_addr) = bind_addr else {
-            return None;
-        };
-        if bind_addr.scope_id() != 0 {
-            return Some(Ok(bind_addr.scope_id()));
-        }
-        let ifs = getifaddrs::InterfaceFilter::new()
-            .v6()
-            .collect()
-            .context("Getting interface addresses");
-        let ifs = match ifs {
-            Ok(x) => x,
-            Err(e) => return Some(Err(e)),
-        };
-        for (iidx, addrs) in ifs.iter() {
-            if let Some(addrs) = addrs.address.get_all(getifaddrs::AddressFamily::V6)
-                && addrs.iter().any(|x| {
-                    x.ip_addr().is_some_and(|x| {
-                        if let IpAddr::V6(addr) = x {
-                            &addr == bind_addr.ip()
-                        } else {
-                            false
-                        }
-                    })
-                })
-            {
-                return Some(Ok(*iidx));
-            }
-        }
-        None
-    };
-    Ok(discovery_ifname
-        .map(|ifname| getifaddrs::if_nametoindex(ifname).context("if_nametoindex"))
-        .or_else(from_addr)
-        .transpose()?
-        .unwrap_or(0))
 }

@@ -233,13 +233,9 @@ async fn imp(mut config: Cli) -> anyhow::Result<()> {
     let discovery;
     let invalid_peers = Mutex::new(BTreeSet::<SocketAddr>::new());
     let remotes = if config.connect.is_empty() {
-        discovery = Discovery::new(
-            config.discovery_multicast,
-            config.discovery_ifname.as_deref(),
-            disc_bind_sock,
-        )
-        .await
-        .context("Create discovery")?;
+        discovery = Discovery::new(config.discovery_multicast, disc_bind_sock)
+            .await
+            .context("Create discovery")?;
         struct St<S> {
             cache: VecDeque<SocketAddr>,
             discovered: S,

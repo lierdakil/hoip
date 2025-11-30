@@ -161,13 +161,9 @@ async fn main_imp(mut config: Cli, ctrl_c: impl Future) -> anyhow::Result<()> {
         false,
     )?;
 
-    let disc = Discovery::new(
-        config.discovery_multicast,
-        config.discovery_ifname.as_deref(),
-        config.listen,
-    )
-    .await
-    .context("Bind discovery")?;
+    let disc = Discovery::new(config.discovery_multicast, config.listen)
+        .await
+        .context("Bind discovery")?;
 
     tokio::select! {
         _ = ctrl_c => Ok(()),
