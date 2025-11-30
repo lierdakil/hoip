@@ -105,7 +105,7 @@ impl Discovery {
     }
 
     pub async fn respond(&self) -> anyhow::Result<()> {
-        let mut buf = vec![0u8; 0xFFFF].into_boxed_slice();
+        let mut buf = [0u8; DISC_LEN + 1];
         loop {
             let (sz, addr) = self
                 .socket
@@ -165,7 +165,7 @@ impl Discovery {
     }
 
     pub fn discovered(&self) -> impl Stream<Item = anyhow::Result<SocketAddr>> {
-        let mut buf = vec![0u8; 0xFFFF].into_boxed_slice();
+        let mut buf = [0u8; DISC_LEN + 1];
         futures::stream::poll_fn(move |cx| {
             let mut buf_read = tokio::io::ReadBuf::new(&mut buf);
             let (port, ip) = loop {
