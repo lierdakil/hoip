@@ -1,8 +1,4 @@
-use std::{
-    collections::BTreeSet,
-    net::{SocketAddr, SocketAddrV6},
-    process::ExitCode,
-};
+use std::{collections::BTreeSet, net::SocketAddr, process::ExitCode};
 
 use anyhow::Context;
 use clap::Parser;
@@ -13,7 +9,7 @@ use evdev::{
 use futures::{TryFutureExt, TryStreamExt};
 use hid_over_ip::{
     codec::Codec,
-    discovery::{DEFAULT_MULTICAST_SOCKET_V4, DEFAULT_MULTICAST_SOCKET_V6, Discovery},
+    discovery::{DEFAULT_MULTICAST_SOCKET_V4, Discovery},
     init_logging,
 };
 use tokio_util::codec::Framed;
@@ -149,24 +145,12 @@ async fn main() -> ExitCode {
 }
 
 async fn main_imp(mut config: Cli, ctrl_c: impl Future) -> anyhow::Result<()> {
-    if let SocketAddr::V6(addr) = &mut config.listen {
-        let iface = hid_over_ip::discovery::guess_iface(
-            SocketAddr::V6(*addr),
-            config.discovery_ifname.as_deref(),
-        )
-        .context("Guess v6 interface")?;
-        addr.set_scope_id(iface);
-        if !addr.ip().is_unspecified() && config.discovery_multicast.is_ipv4() {
-            let mut def: SocketAddrV6 = DEFAULT_MULTICAST_SOCKET_V6.parse().unwrap();
-            def.set_port(config.discovery_multicast.port());
-            def.set_scope_id(iface);
-            config.discovery_multicast = def.into();
-            tracing::warn!(
-                discovery_multicast = %config.discovery_multicast,
-                "Multicast address changed to ipv6!"
-            );
-        }
-    }
+    hid_over_ip::fix_socket_addr_iface(
+        &mut config.listen,
+        &mut config.discovery_multicast,
+        config.discovery_ifname.as_deref(),
+        false,
+    )?;
 
     let disc = Discovery::new(
         config.discovery_multicast,

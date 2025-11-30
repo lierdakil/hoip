@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashSet, VecDeque, btree_map::Entry},
-    net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6, ToSocketAddrs},
+    net::{IpAddr, Ipv6Addr, SocketAddr, ToSocketAddrs},
     process::ExitCode,
     time::Duration,
 };
@@ -11,7 +11,7 @@ use evdev::{EventSummary, InputEvent, KeyCode};
 use futures::{SinkExt, Stream, StreamExt, TryStream, TryStreamExt};
 use hid_over_ip::{
     codec::Codec,
-    discovery::{DEFAULT_MULTICAST_SOCKET_V4, DEFAULT_MULTICAST_SOCKET_V6, Discovery},
+    discovery::{DEFAULT_MULTICAST_SOCKET_V4, Discovery},
     init_logging,
 };
 use tokio::sync::Mutex;
@@ -163,26 +163,12 @@ async fn imp(mut config: Cli) -> anyhow::Result<()> {
             .unwrap_or(Ipv6Addr::UNSPECIFIED.into()),
         0,
     );
-    if let SocketAddr::V6(addr) = &mut disc_bind_sock {
-        let iface = hid_over_ip::discovery::guess_iface(
-            SocketAddr::V6(*addr),
-            config.discovery_ifname.as_deref(),
-        )
-        .context("Guess v6 interface")?;
-        addr.set_scope_id(iface);
-        if config.discovery_force_v6
-            || !disc_bind_sock.ip().is_unspecified() && config.discovery_multicast.is_ipv4()
-        {
-            let mut def: SocketAddrV6 = DEFAULT_MULTICAST_SOCKET_V6.parse().unwrap();
-            def.set_port(config.discovery_multicast.port());
-            def.set_scope_id(iface);
-            config.discovery_multicast = def.into();
-            tracing::warn!(
-                discovery_multicast = %config.discovery_multicast,
-                "Multicast address changed to ipv6!"
-            );
-        }
-    }
+    hid_over_ip::fix_socket_addr_iface(
+        &mut disc_bind_sock,
+        &mut config.discovery_multicast,
+        config.discovery_ifname.as_deref(),
+        config.discovery_force_v6,
+    )?;
 
     let mut requested_devices: HashSet<_> = config.device.iter().map(|x| x.as_str()).collect();
     let mut devices: Vec<evdev::Device> = vec![];
