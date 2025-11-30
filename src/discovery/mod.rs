@@ -56,12 +56,16 @@ impl Discovery {
                 mcast_v6.set_scope_id(iface);
             }
         }
-        socket
-            .set_multicast_loop_v4(false)
-            .context("Disable V4 multicast loop")?;
-        socket
-            .set_multicast_loop_v6(false)
-            .context("Disable V6 multicast loop")?;
+        if discovery_sock.is_ipv4() {
+            socket
+                .set_multicast_loop_v4(false)
+                .context("Disable V4 multicast loop")?;
+        }
+        if discovery_sock.is_ipv6() {
+            socket
+                .set_multicast_loop_v6(false)
+                .context("Disable V6 multicast loop")?;
+        }
         Ok(Self {
             socket,
             bind: bind_addr,
