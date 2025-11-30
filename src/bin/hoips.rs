@@ -1,13 +1,19 @@
 use std::{
-    collections::{BTreeMap, HashSet, btree_map::Entry},
+    collections::{BTreeMap, BTreeSet, HashSet, VecDeque, btree_map::Entry},
+    net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6},
     process::ExitCode,
     time::Duration,
 };
 
+use anyhow::Context;
 use clap::Parser;
 use evdev::{EventSummary, InputEvent, KeyCode};
-use futures::{SinkExt, StreamExt, TryStream, TryStreamExt};
-use hid_over_ip::{Codec, init_logging};
+use futures::{SinkExt, Stream, StreamExt, TryStream, TryStreamExt};
+use hid_over_ip::{
+    codec::Codec,
+    discovery::{DEFAULT_MULTICAST_SOCKET_V4, DEFAULT_MULTICAST_SOCKET_V6, Discovery},
+    init_logging,
+};
 use tokio::sync::Mutex;
 use tokio_util::codec::Framed;
 
@@ -24,9 +30,10 @@ struct Cli {
     #[arg(long, short, required_unless_present_any = ["list_devices", "dump_events"])]
     device: Vec<String>,
     /// Clients to send events to. Only one client can be active at a time, will
-    /// round-robin between them.
-    #[arg(long, short, required_unless_present_any = ["list_devices", "dump_events"])]
-    connect: Vec<String>,
+    /// round-robin between them. If unspecified, LAN multicast discovery will
+    /// be used.
+    #[arg(long, short)]
+    connect: Vec<SocketAddr>,
     /// List devices and exit.
     #[arg(long, short, conflicts_with_all = ["device", "connect"])]
     list_devices: bool,
@@ -36,6 +43,41 @@ struct Cli {
     /// Keys, when pressed, will release the grab or connect to the next client.
     #[arg(long, short, default_values = ["KEY_LEFTCTRL","KEY_LEFTSHIFT","KEY_F12"])]
     magic_key: Vec<KeyCode>,
+    /// Connect immediately on start. If not set, will wait for magic key first.
+    #[arg(long)]
+    connect_on_start: bool,
+    /// What multicast address to use for peer discovery. If
+    /// `--discovery-bind-addr` is V6 while this is V4, will default to a V6
+    /// instead.
+    #[arg(long, default_value = DEFAULT_MULTICAST_SOCKET_V4)]
+    discovery_multicast: SocketAddr,
+    /// Force IPv6 address for discovery. Ignored if `--discovery-bind-addr` is
+    /// IPv4-only.
+    #[arg(long)]
+    discovery_force_v6: bool,
+    /// Which network interface to run discovery on. Will try to guess if
+    /// unspecified.
+    #[arg(long)]
+    discovery_ifname: Option<String>,
+    /// Which address to bind to when doing peer discovery. Will default to
+    /// wildcard if unspecified.
+    #[arg(long)]
+    discovery_bind_addr: Option<IpAddr>,
+    /// How often to broadcast discovery request during peer discovery. Should
+    /// not be smaller than roughly how long peers are expected to reply.
+    #[arg(long, default_value = "300ms", value_parser = humantime::parse_duration)]
+    discovery_request_period: Duration,
+    /// How long to attempt repeated discovery, if we have cached peers that are
+    /// still alive. This delay will happen every time when switching between
+    /// peers, so it should be reasonably small.
+    #[arg(long, default_value = "500ms", value_parser = humantime::parse_duration)]
+    discovery_cache_timeout: Duration,
+    /// How long to attempt discovery before giving up if we have no cached
+    /// peers. When this timeout elapses, pressing magic key would be required.
+    /// Serves to prevent spontaneous unexpected connections to peers that
+    /// suddenly come online.
+    #[arg(long, default_value = "3s", value_parser = humantime::parse_duration)]
+    discovery_timeout: Duration,
 }
 
 enum Error {
@@ -43,13 +85,9 @@ enum Error {
     Other(anyhow::Error),
 }
 
-impl<E> From<E> for Error
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    #[cold]
-    fn from(error: E) -> Self {
-        Error::Other(anyhow::Error::from(error))
+impl From<anyhow::Error> for Error {
+    fn from(error: anyhow::Error) -> Self {
+        Error::Other(error)
     }
 }
 
@@ -69,12 +107,13 @@ impl Magic {
     fn key(&mut self, key_code: KeyCode, value: i32) -> bool {
         if let Entry::Occupied(mut entry) = self.keys.entry(key_code) {
             entry.insert(value);
-            let next_armed = self.keys.values().all(|v| *v != 0);
-            let prev_armed = std::mem::replace(&mut self.armed, next_armed);
-            prev_armed && !next_armed
-        } else {
-            false
+            if self.armed && self.keys.values().all(|v| *v == 0) {
+                self.armed = false;
+                return true;
+            }
+            self.armed |= self.keys.values().all(|v| *v != 0);
         }
+        false
     }
 }
 
@@ -104,14 +143,41 @@ async fn main() -> ExitCode {
         res = imp(config) => match res {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                tracing::error!(%error);
+                tracing::error!("{error:#}");
                 ExitCode::FAILURE
             },
         },
     }
 }
 
-async fn imp(config: Cli) -> anyhow::Result<()> {
+async fn imp(mut config: Cli) -> anyhow::Result<()> {
+    let mut disc_bind_sock = SocketAddr::new(
+        config
+            .discovery_bind_addr
+            .unwrap_or(Ipv6Addr::UNSPECIFIED.into()),
+        0,
+    );
+    if let SocketAddr::V6(addr) = &mut disc_bind_sock {
+        let iface = hid_over_ip::discovery::guess_iface(
+            SocketAddr::V6(*addr),
+            config.discovery_ifname.as_deref(),
+        )
+        .context("Guess v6 interface")?;
+        addr.set_scope_id(iface);
+        if config.discovery_force_v6
+            || !disc_bind_sock.ip().is_unspecified() && config.discovery_multicast.is_ipv4()
+        {
+            let mut def: SocketAddrV6 = DEFAULT_MULTICAST_SOCKET_V6.parse().unwrap();
+            def.set_port(config.discovery_multicast.port());
+            def.set_scope_id(iface);
+            config.discovery_multicast = def.into();
+            tracing::warn!(
+                discovery_multicast = %config.discovery_multicast,
+                "Multicast address changed to ipv6!"
+            );
+        }
+    }
+
     let mut requested_devices: HashSet<_> = config.device.iter().map(|x| x.as_str()).collect();
     let mut devices: Vec<evdev::Device> = vec![];
     for (path, dev) in evdev::enumerate() {
@@ -141,7 +207,8 @@ async fn imp(config: Cli) -> anyhow::Result<()> {
     let streams: Vec<_> = devices
         .into_iter()
         .map(|dev| dev.into_event_stream())
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_, _>>()
+        .context("Collect event streams")?;
 
     let udev_stream = Mutex::new(futures::stream::select_all(streams).err_into());
 
@@ -150,12 +217,14 @@ async fn imp(config: Cli) -> anyhow::Result<()> {
     }
 
     let connect = async |connect| {
-        let tcp_stream = tokio::net::TcpStream::connect(connect).await?;
-        tracing::info!(remote = connect, "Connected to remote");
+        let tcp_stream = tokio::net::TcpStream::connect(connect)
+            .await
+            .context("Open TCP stream")?;
+        tracing::info!(remote = %connect, "Connected to remote");
         let mut framed = Framed::new(tcp_stream, Codec).sink_map_err(Error::Other);
         let udev_stream = &mut *udev_stream.lock().await;
         for dev in udev_stream.get_mut().iter_mut() {
-            dev.device_mut().grab()?;
+            dev.device_mut().grab().context("Grab device")?;
         }
         tracing::info!("Grabbed devices");
         let mut magic = Magic::from_iter(&config.magic_key);
@@ -169,14 +238,86 @@ async fn imp(config: Cli) -> anyhow::Result<()> {
         Ok::<_, Error>(())
     };
 
-    let mut remotes = config.connect.iter().cycle();
+    let discovery;
+    let invalid_peers = Mutex::new(BTreeSet::<SocketAddr>::new());
+    let remotes = if config.connect.is_empty() {
+        discovery = Discovery::new(
+            config.discovery_multicast,
+            config.discovery_ifname.as_deref(),
+            disc_bind_sock,
+        )
+        .await
+        .context("Create discovery")?;
+        struct St<S> {
+            cache: VecDeque<SocketAddr>,
+            discovered: S,
+        }
+        let st = Box::new(St {
+            cache: VecDeque::<SocketAddr>::new(),
+            discovered: discovery.discovered(),
+        });
+        let return_on_timeout = futures::stream::unfold(st, |mut st| async {
+            {
+                let bad = &invalid_peers.lock().await;
+                st.cache.retain(|elt| !bad.contains(elt));
+            }
+            let try_next = async {
+                loop {
+                    let next = st.discovered.next().await?;
+                    // if it's already in the cache, fish for another
+                    if let Ok(value) = next
+                        && st.cache.contains(&value)
+                    {
+                        continue;
+                    }
+                    break Some(next);
+                }
+            };
+            let discover = discovery.discover(Duration::from_millis(300));
+            let timeout = tokio::time::sleep(Duration::from_secs(1));
+            let value = tokio::select! {
+                peer = try_next => Some(peer?),
+                err = discover => Some(err.map(|never| match never {})),
+                _ = timeout, if !st.cache.is_empty() => None,
+            };
+            let value = value.unwrap_or_else(|| {
+                let peer = st.cache.pop_front().unwrap();
+                tracing::info!(%peer, "No new discoveries, using peer from cache");
+                Ok(peer)
+            });
+            if let Ok(value) = value {
+                st.cache.push_back(value);
+            }
+            Some((value, st))
+        });
+        return_on_timeout.left_stream()
+    } else {
+        futures::stream::iter(config.connect.iter().cycle())
+            .map(|x| Ok(*x))
+            .right_stream()
+    };
+    let mut remotes = std::pin::pin!(remotes);
+
+    let mut do_wait = !config.connect_on_start;
 
     loop {
-        let mut magic = false;
-        let Some(remote) = remotes.next() else {
+        if do_wait {
+            wait_magic(&config, &mut *udev_stream.lock().await)
+                .await
+                .context("Waiting for magic")?;
+        }
+        let Ok(remote) = tokio::time::timeout(Duration::from_secs(3), remotes.try_next()).await
+        else {
+            // timed out
+            tracing::warn!("No remote found, timeout elapsed");
+            continue;
+        };
+        let Some(remote) = remote.context("While getting remote peer")? else {
+            // stream ended
             break Ok(());
         };
-        tracing::info!(remote = remote, "Connecting...");
+        tracing::info!(remote = %remote, "Connecting...");
+        let mut magic = false;
         if let Err(e) = connect(remote).await {
             match e {
                 Error::MagicKey => {
@@ -184,37 +325,65 @@ async fn imp(config: Cli) -> anyhow::Result<()> {
                     magic = true;
                 }
                 Error::Other(e) => {
-                    tracing::error!(%e);
+                    invalid_peers.lock().await.insert(remote);
+                    tracing::error!("{e:?}");
                 }
             }
         }
-        for dev in udev_stream.lock().await.get_mut().iter_mut() {
-            dev.device_mut().ungrab()?;
-        }
-        tracing::info!("Ungrabbed devices");
-        if magic {
-            tracing::info!("Waiting for magic key...");
-            let mut stream = udev_stream.lock().await;
-            let mut magic = Magic::from_iter(&config.magic_key);
-            while let Some(evt) = stream.try_next().await? {
-                if let EventSummary::Key(_, key_code, value) = evt.destructure()
-                    && magic.key(key_code, value)
-                {
-                    tracing::info!("Magic key pressed");
-                    break;
-                }
+        let is_grabbed = udev_stream
+            .lock()
+            .await
+            .get_mut()
+            .iter()
+            .any(|x| x.device().is_grabbed());
+        if is_grabbed {
+            // managed to connect to a remote, however briefly. wait for magic
+            // next time around.
+            do_wait = true;
+            if !magic {
+                // connection terminated unexpectedly. to prevent
+                // surprises, wait for magic key, then ungrab.
+                wait_magic(&config, &mut *udev_stream.lock().await)
+                    .await
+                    .context("Wating for magic")?;
             }
-        } else {
-            // if it's not magic, it's error, wait a bit
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            for dev in udev_stream.lock().await.get_mut().iter_mut() {
+                dev.device_mut().ungrab().context("Ungrab device")?;
+            }
+            tracing::info!("Ungrabbed devices");
         }
     }
+}
+
+async fn wait_magic(
+    config: &Cli,
+    mut stream: impl Stream<Item = anyhow::Result<InputEvent>> + Unpin,
+) -> Result<(), anyhow::Error> {
+    tracing::info!("Waiting for magic key...");
+    let mut magic = Magic::from_iter(&config.magic_key);
+    while let Some(evt) = stream
+        .try_next()
+        .await
+        .context("Monitoring input for magic")?
+    {
+        if let EventSummary::Key(_, key_code, value) = evt.destructure()
+            && magic.key(key_code, value)
+        {
+            tracing::info!("Magic key pressed");
+            break;
+        }
+    }
+    Ok(())
 }
 
 async fn dump_events(
     udev_stream: &mut (impl TryStream<Ok = InputEvent, Error = anyhow::Error> + Unpin),
 ) -> anyhow::Result<()> {
-    while let Some(event) = udev_stream.try_next().await? {
+    while let Some(event) = udev_stream
+        .try_next()
+        .await
+        .context("Monitoring events to dump")?
+    {
         macro_rules! dump {
             ($($i:ident),* $(,)*) => {
                 match event.destructure() {
